@@ -866,7 +866,7 @@ mod tests {
 
         let msg = InstantiateMsg {
             name: "iUPPITER".to_string(),
-            symbol: "IUP".to_string(),
+            symbol: "iUP".to_string(),
             decimals: 6,
             initial_balances: vec![Cw20Coin {
                 address: ADMIN.to_string(),
@@ -909,7 +909,7 @@ mod tests {
         // Initialize contract
         let msg = InstantiateMsg {
             name: "iUPPITER".to_string(),
-            symbol: "IUP".to_string(),
+            symbol: "iUP".to_string(),
             decimals: 6,
             initial_balances: vec![Cw20Coin {
                 address: ADMIN.to_string(),
@@ -959,7 +959,7 @@ mod tests {
         // Initialize contract
         let msg = InstantiateMsg {
             name: "iUPPITER".to_string(),
-            symbol: "IUP".to_string(),
+            symbol: "iUP".to_string(),
             decimals: 6,
             initial_balances: vec![Cw20Coin {
                 address: ADMIN.to_string(),
@@ -1023,7 +1023,7 @@ mod tests {
         // Initialize contract
         let msg = InstantiateMsg {
             name: "iUPPITER".to_string(),
-            symbol: "IUP".to_string(),
+            symbol: "iUP".to_string(),
             decimals: 6,
             initial_balances: vec![Cw20Coin {
                 address: ADMIN.to_string(),
@@ -1072,7 +1072,7 @@ mod tests {
         // 컨트랙트 초기화
         let msg = InstantiateMsg {
             name: "iUPPITER".to_string(),
-            symbol: "IUP".to_string(),
+            symbol: "iUP".to_string(),
             decimals: 6,
             initial_balances: vec![Cw20Coin {
                 address: ADMIN.to_string(),
@@ -1080,7 +1080,7 @@ mod tests {
             }],
             marketing: Some(InstantiateMarketingInfo {
                 project: Some("iUPPITER Project".to_string()),
-                description: Some("Game Token".to_string()),
+                description: Some("Game Platform Token".to_string()),
                 marketing: None,
                 logo: None,
                 logo_url_state: Some("https://example.com/logo.png".to_string()),
