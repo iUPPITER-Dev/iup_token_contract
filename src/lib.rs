@@ -1,8 +1,15 @@
 pub mod allowances;
 pub mod contract;
 pub mod enumerable;
-mod error;
+pub mod error;
 pub mod msg;
 pub mod state;
 
 pub use crate::error::ContractError;
+
+#[cfg(test)]
+mod tests {
+    // 테스트 모듈 선언
+    pub mod integration_tests;
+    pub mod fee_tests;
+}

@@ -1,104 +1,148 @@
 # Developing
 
-If you have recently created a contract with this template, you probably could use some
-help on how to build and test the contract, as well as prepare it for production. This
-file attempts to provide a brief overview, assuming you have installed a recent
-version of Rust already (eg. 1.58.1+).
+This document explains how to set up your development environment and start working with the CW20 token contract with fee mechanism.
 
 ## Prerequisites
 
-Before starting, make sure you have [rustup](https://rustup.rs/) along with a
-recent `rustc` and `cargo` version installed. Currently, we are testing on 1.58.1+.
+Before you start, make sure you have:
 
-And you need to have the `wasm32-unknown-unknown` target installed as well.
+- [Rust](https://www.rust-lang.org/) 1.60.0+
+- [Cargo](https://doc.rust-lang.org/cargo/)
+- [Docker](https://www.docker.com/) (optional, for optimized builds)
+- [Go](https://golang.org/) 1.18+ (optional, for blockchain simulation)
 
-You can check that via:
+## Development Environment Setup
 
+1. Clone the repository:
 ```sh
-rustc --version
-cargo --version
-rustup target list --installed
-# if wasm32 is not listed above, run this
-rustup target add wasm32-unknown-unknown
+git clone [YOUR-REPOSITORY-URL]
+cd [REPOSITORY-NAME]
 ```
 
-## Compiling and running tests
-
-Now that you created your custom contract, make sure you can compile and run it before
-making any changes. Go into the repository and do:
-
+2. Install development tools:
 ```sh
-# this will produce a wasm build in ./target/wasm32-unknown-unknown/release/YOUR_NAME_HERE.wasm
-cargo wasm
+cargo install cargo-run-script
+```
 
-# this runs unit tests with helpful backtraces
-RUST_BACKTRACE=1 cargo unit-test
+## Testing
 
-# auto-generate json schema
+### Running Unit Tests
+
+Run unit tests with:
+```sh
+cargo test
+```
+
+For verbose output:
+```sh
+cargo test -- --nocapture
+```
+
+To run a specific test:
+```sh
+cargo test [TEST_NAME]
+```
+
+For example, to run the fee-related tests:
+```sh
+cargo test test_transfer_fee
+```
+
+### Testing with Blockchain Simulation
+
+If you want to test the contract in a more realistic environment, you can use `wasmd` (a Go implementation of CosmWasm):
+
+1. Install wasmd:
+```sh
+git clone https://github.com/CosmWasm/wasmd.git
+cd wasmd
+make install
+```
+
+2. Set up a local blockchain:
+```sh
+# Initialize the chain
+wasmd init mynode --chain-id test-chain
+
+# Add an account
+wasmd keys add my-account
+
+# Add genesis account with tokens
+wasmd add-genesis-account $(wasmd keys show my-account -a) 10000000000stake,10000000000token
+
+# Generate a genesis transaction
+wasmd gentx my-account 1000000stake --chain-id test-chain
+
+# Collect genesis transactions
+wasmd collect-gentxs
+
+# Start the blockchain
+wasmd start
+```
+
+3. Deploy and test your contract on the local chain (refer to the Publishing.md file for detailed steps).
+
+## Contract Development
+
+### Project Structure
+
+- `src/`: Source code directory
+  - `contract.rs`: Main contract functionality
+  - `error.rs`: Error definitions
+  - `msg.rs`: Message definitions
+  - `state.rs`: State management
+
+### Implementing Fee Functionality
+
+The fee mechanism is implemented mainly in:
+- `execute_transfer` function: Handles direct token transfers with fee deduction
+- `execute_transfer_from` function: Handles delegated token transfers with fee deduction
+- `execute_send` function: Handles sending tokens to a contract with fee deduction
+- `execute_send_from` function: Handles delegated sending to a contract with fee deduction
+- `execute_set_transfer_fee` function: Manages fee configuration
+
+### Adding New Features
+
+When adding new features:
+1. Define new message types in `msg.rs`
+2. Add state management in `state.rs` if needed
+3. Implement the feature's logic in `contract.rs`
+4. Add comprehensive tests for the new feature
+5. Update documentation to reflect changes
+
+## Building
+
+### Debug Build
+
+For a debug build:
+```sh
+cargo build
+```
+
+### Optimized Build
+
+For deploying on a blockchain, you need an optimized build:
+```sh
+cargo run-script optimize
+```
+
+This uses Docker to create a reproducible build environment and produces an optimized Wasm binary.
+
+## Continuous Integration
+
+This project uses GitHub Actions for CI. Every pull request and push to the main branch will:
+1. Run unit tests
+2. Perform linting
+3. Create an optimized build
+4. Check code coverage
+
+See the `.github/workflows/` directory for CI configuration.
+
+## Schema Generation
+
+Generate JSON schema files for messages with:
+```sh
 cargo schema
 ```
 
-### Understanding the tests
-
-The main code is in `src/contract.rs` and the unit tests there run in pure rust,
-which makes them very quick to execute and give nice output on failures, especially
-if you do `RUST_BACKTRACE=1 cargo unit-test`.
-
-We consider testing critical for anything on a blockchain, and recommend to always keep
-the tests up to date.
-
-## Generating JSON Schema
-
-While the Wasm calls (`instantiate`, `execute`, `query`) accept JSON, this is not enough
-information to use it. We need to expose the schema for the expected messages to the
-clients. You can generate this schema by calling `cargo schema`, which will output
-4 files in `./schema`, corresponding to the 3 message types the contract accepts,
-as well as the internal `State`.
-
-These files are in standard json-schema format, which should be usable by various
-client side tools, either to auto-generate codecs, or just to validate incoming
-json wrt. the defined schema.
-
-## Preparing the Wasm bytecode for production
-
-Before we upload it to a chain, we need to ensure the smallest output size possible,
-as this will be included in the body of a transaction. We also want to have a
-reproducible build process, so third parties can verify that the uploaded Wasm
-code did indeed come from the claimed rust code.
-
-To solve both these issues, we have produced `rust-optimizer`, a docker image to
-produce an extremely small build output in a consistent manner. The suggest way
-to run it is this:
-
-```sh
-docker run --rm -v "$(pwd)":/code \
-  --mount type=volume,source="$(basename "$(pwd)")_cache",target=/target \
-  --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
-  cosmwasm/optimizer:0.15.0
-```
-
-Or, If you're on an arm64 machine, you should use a docker image built with arm64.
-
-```sh
-docker run --rm -v "$(pwd)":/code \
-  --mount type=volume,source="$(basename "$(pwd)")_cache",target=/target \
-  --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
-  cosmwasm/optimizer-arm64:0.15.0
-```
-
-We must mount the contract code to `/code`. You can use an absolute path instead
-of `$(pwd)` if you don't want to `cd` to the directory first. The other two
-volumes are nice for speedup.
-Note the `/target` cache is unique for each contract being compiled to limit
-interference, while the registry cache is global.
-
-This is rather slow compared to local compilations, especially the first compile
-of a given contract. The use of the two volume caches is very useful to speed up
-following compiles of the same contract.
-
-This produces an `artifacts` directory with a `PROJECT_NAME.wasm`, as well as
-`checksums.txt`, containing the Sha256 hash of the wasm file.
-The wasm file is compiled deterministically (anyone else running the same
-docker on the same git commit should get the identical file with the same Sha256 hash).
-It is also stripped and minimized for upload to a blockchain (we will also
-gzip it in the uploading process to make it even smaller).
+This creates schema files in the `schema/` directory, which can be used for integrations and frontend development.

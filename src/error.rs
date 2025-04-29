@@ -52,4 +52,12 @@ pub enum ContractError {
 
     #[error("Feature not implemented")]
     NotImplemented {},
+
+    #[error("Invalid fee percentage: {0}")]
+    InvalidFeePercentage(String),
+
+    #[error("Insufficient funds")]
+    InsufficientFunds {},
+
+    
 }

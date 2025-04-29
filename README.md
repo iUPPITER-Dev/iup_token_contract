@@ -1,85 +1,123 @@
-# CosmWasm Starter Pack
+# CW20 Token Contract with Fee Mechanism
 
-This is a template to build smart contracts in Rust to run inside a
-[Cosmos SDK](https://github.com/cosmos/cosmos-sdk) module on all chains that enable it.
-To understand the framework better, please read the overview in the
-[cosmwasm repo](https://github.com/CosmWasm/cosmwasm/blob/master/README.md),
-and dig into the [cosmwasm docs](https://www.cosmwasm.com).
-This assumes you understand the theory and just want to get coding.
+This project is a CosmWasm smart contract that extends the standard CW20 token contract with transaction fee functionality. It can be deployed on any chain that supports the [Cosmos SDK](https://github.com/cosmos/cosmos-sdk) module.
 
-## Creating a new repo from template
+## Key Features
 
-Assuming you have a recent version of Rust and Cargo installed
-(via [rustup](https://rustup.rs/)),
-then the following should get you a new repo to start a contract:
+### 1. Standard CW20 Token Features
+- Token minting and transfer
+- Burn functionality
+- Allowance mechanism
+- Minter configuration
+- Marketing information settings
 
-Install [cargo-generate](https://github.com/ashleygwilliams/cargo-generate) and cargo-run-script.
-Unless you did that before, run this line now:
+### 2. Fee Mechanism
+- Admin can set transfer fee percentage
+- Configurable fee collector account
+- Fee calculated as percentage of transfer amount
+- Fee is deducted from transfer amount before recipient receives tokens
+- Fee mechanism applied to all transfer functions: `transfer`, `transfer_from`, `send`, `send_from`
 
-```sh
-cargo install cargo-generate --features vendored-openssl
-cargo install cargo-run-script
+## Setting Up Fees
+
+The contract admin can set fees as follows:
+
+```rust
+// Set 1% fee rate
+let set_fee_msg = ExecuteMsg::SetTransferFee {
+    fee_percentage: Some("1.0".to_string()),
+    fee_collector: Some("fee_collector_address".to_string()),
+};
 ```
 
-Now, use it to create your new contract.
-Go to the folder in which you want to place it and run:
+Fee rate limits:
+- Minimum fee rate: 0.001%
+- Maximum fee rate: 100%
 
-**Latest**
-
-```sh
-cargo generate --git https://github.com/CosmWasm/cw-template.git --name PROJECT_NAME
+To remove fee settings:
+```rust
+// Remove fee settings
+let remove_fee_msg = ExecuteMsg::SetTransferFee {
+    fee_percentage: None,
+    fee_collector: None,
+};
 ```
 
-For cloning minimal code repo:
+## Fee Calculation
 
-```sh
-cargo generate --git https://github.com/CosmWasm/cw-template.git --name PROJECT_NAME -d minimal=true
+Fees are calculated during transfers as follows:
+- Fee amount = Transfer amount * Fee rate / 100
+- Actual transfer amount = Transfer amount - Fee amount
+
+For example, with a 1% fee rate when transferring 100 tokens:
+- Fee amount: 1 token
+- Actual transfer amount: 99 tokens
+
+## Contract Initialization Example
+
+```rust
+let msg = InstantiateMsg {
+    name: "Fee Token".to_string(),
+    symbol: "FEE".to_string(),
+    decimals: 6,
+    initial_balances: vec![
+        Cw20Coin {
+            address: "admin_address".to_string(),
+            amount: Uint128::new(1000000000),
+        },
+    ],
+    marketing: None,
+    mint: Some(MinterResponse {
+        minter: "minter_address".to_string(),
+        cap: None,
+    }),
+    created_on_platform: Some("platform_name".to_string()), // Optional field
+};
 ```
 
-You will now have a new folder called `PROJECT_NAME` (I hope you changed that to something else)
-containing a simple working contract and build system that you can customize.
+## Key Messages
 
-## Create a Repo
-
-After generating, you have a initialized local git repo, but no commits, and no remote.
-Go to a server (eg. github) and create a new upstream repo (called `YOUR-GIT-URL` below).
-Then run the following:
-
-```sh
-# this is needed to create a valid Cargo.lock file (see below)
-cargo check
-git branch -M main
-git add .
-git commit -m 'Initial Commit'
-git remote add origin YOUR-GIT-URL
-git push -u origin main
+### Setting Fees
+```rust
+ExecuteMsg::SetTransferFee {
+    fee_percentage: Option<String>,
+    fee_collector: Option<String>,
+}
 ```
 
-## CI Support
+### Querying Fee Information
+```rust
+QueryMsg::TransferFee {}
+```
 
-We have template configurations for both [GitHub Actions](.github/workflows/Basic.yml)
-and [Circle CI](.circleci/config.yml) in the generated project, so you can
-get up and running with CI right away.
+Response:
+```rust
+#[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema, Debug)]
+pub struct TransferFeeResponse {
+    pub transfer_fee: Option<String>,
+    pub fee_collector: Option<String>,
+}
+```
 
-One note is that the CI runs all `cargo` commands
-with `--locked` to ensure it uses the exact same versions as you have locally. This also means
-you must have an up-to-date `Cargo.lock` file, which is not auto-generated.
-The first time you set up the project (or after adding any dep), you should ensure the
-`Cargo.lock` file is updated, so the CI will test properly. This can be done simply by
-running `cargo check` or `cargo unit-test`.
+## Getting Started with Development
 
-## Using your project
+To start developing with this project, follow these steps:
 
-Once you have your custom repo, you should check out [Developing](./Developing.md) to explain
-more on how to run tests and develop code. Or go through the
-[online tutorial](https://docs.cosmwasm.com/) to get a better feel
-of how to develop.
+```sh
+# Install dependencies and compile
+cargo build
 
-[Publishing](./Publishing.md) contains useful information on how to publish your contract
-to the world, once you are ready to deploy it on a running blockchain. And
-[Importing](./Importing.md) contains information about pulling in other contracts or crates
-that have been published.
+# Run tests
+cargo test
 
-Please replace this README file with information about your specific project. You can keep
-the `Developing.md` and `Publishing.md` files as useful references, but please set some
-proper description in the README.
+# Optimized build for contract deployment
+cargo run-script optimize
+```
+
+## Deploying and Using the Contract
+
+For detailed information on how to deploy and use the contract, refer to the [Developing.md](./Developing.md) and [Publishing.md](./Publishing.md) files.
+
+## License
+
+This project is distributed under the Apache 2.0 license.

@@ -43,6 +43,12 @@ pub struct InstantiateMsg {
     pub created_on_platform: Option<String>,
 }
 
+#[cw_serde]
+pub struct TransferFeeResponse {
+    pub transfer_fee: Option<String>,
+    pub fee_collector: Option<String>,
+}
+
 impl InstantiateMsg {
     pub fn get_cap(&self) -> Option<Uint128> {
         self.mint.as_ref().and_then(|m| m.cap)
@@ -138,6 +144,10 @@ pub enum ExecuteMsg {
     UpdateConfig {
         new_config: Option<ConfigInfo>,
     },
+    SetTransferFee {
+        fee_percentage: Option<String>,
+        fee_collector: Option<String>,
+    },
    
 }
 
@@ -178,6 +188,8 @@ pub enum QueryMsg {
     Minter {},
     #[returns(TotalSupplyResponse)]
     TotalSupply {},
+    #[returns(TransferFeeResponse)]
+    TransferFee {},
 }
 
 #[cw_serde]
