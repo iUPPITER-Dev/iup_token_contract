@@ -3,10 +3,13 @@ use cosmwasm_std::{
     Storage, Uint128,
 };
 use cw20::{AllowanceResponse, Cw20ReceiveMsg, Expiration};
-use crate::contract::calculate_transfer_amounts;
+use crate::fee::{add_fee_attributes, calculate_fee};
+
+#[cfg(test)]
+use crate::fee::apply_fee_transfers;
 
 use crate::error::ContractError;
-use crate::state::{ALLOWANCES, ALLOWANCES_SPENDER, BALANCES, CONFIG, TOKEN_INFO};
+use crate::state::{ALLOWANCES, ALLOWANCES_SPENDER, BALANCES, FEE_CONFIG, TOKEN_INFO};
 
 pub fn execute_increase_allowance(
     deps: DepsMut,
@@ -140,28 +143,23 @@ pub fn execute_transfer_from(
     recipient: String,
     amount: Uint128,
 ) -> Result<Response, ContractError> {
-    // 수신자 주소 검증
+    // 주소 검증 (기존 코드 유지)
     #[cfg(test)]
     let rcpt_addr = Addr::unchecked(&recipient);
     #[cfg(not(test))]
     let rcpt_addr = deps.api.addr_validate(&recipient)?;
     
-    // 소유자 주소 검증
     #[cfg(test)]
     let owner_addr = Addr::unchecked(&owner);
     #[cfg(not(test))]
     let owner_addr = deps.api.addr_validate(&owner)?;
 
-    // 설정 로드
-    let config = CONFIG.load(deps.storage)?;
-    
-    // 수수료 계산
-    let (transfer_amount, fee_amount, fee_collector_str) = calculate_transfer_amounts(
-        deps.storage, amount, &config)?;
-
-    // deduct allowance before doing anything else have enough allowance
+    // 허용량 차감 먼저 수행
     deduct_allowance(deps.storage, &owner_addr, &info.sender, &env.block, amount)?;
 
+    // 수수료 계산 (새로운 방식)
+    let fee_result = calculate_fee(deps.as_ref(), amount, &owner_addr)?;
+    
     // 발신자 잔액 감소
     BALANCES.update(
         deps.storage,
@@ -176,35 +174,30 @@ pub fn execute_transfer_from(
         deps.storage,
         &rcpt_addr,
         |balance: Option<Uint128>| -> StdResult<_> { 
-            Ok(balance.unwrap_or_default() + transfer_amount) 
+            Ok(balance.unwrap_or_default() + fee_result.transfer_amount) 
         },
     )?;
-    
-    // 수수료 수취 계정에 수수료 추가
-    if !fee_amount.is_zero() && fee_collector_str.is_some() {
-        #[cfg(test)]
-        let fee_collector_addr = Addr::unchecked(&fee_collector_str.clone().unwrap());
-        
-        #[cfg(not(test))]
-        let fee_collector_addr = deps.api.addr_validate(&fee_collector_str.clone().unwrap())?;
-        
-        BALANCES.update(deps.storage, &fee_collector_addr, |balance| -> StdResult<_> {
-            Ok(balance.unwrap_or_default() + fee_amount)
-        })?;
-    }
 
+     // 테스트 환경에서만 수수료 이체 직접 처리
+    #[cfg(test)]
+    apply_fee_transfers(deps.storage, &fee_result)?;
+    
+    // 응답 생성
     let mut response = Response::new()
         .add_attribute("action", "transfer_from")
         .add_attribute("from", owner)
         .add_attribute("to", recipient)
         .add_attribute("by", info.sender)
-        .add_attribute("amount", transfer_amount);
+        .add_attribute("amount", fee_result.transfer_amount);
     
-    if !fee_amount.is_zero() {
-        response = response
-            .add_attribute("fee_amount", fee_amount)
-            .add_attribute("fee_collector", fee_collector_str.unwrap_or_else(|| "None".to_string()));
+    // 수수료 메시지가 있으면 추가 (클론을 사용하여 소유권 이동 방지)
+    if !fee_result.fee_msgs.is_empty() {
+        response = response.add_messages(fee_result.fee_msgs.clone());
     }
+    
+    // 수수료 관련 속성 추가
+    let fee_config = FEE_CONFIG.may_load(deps.storage)?;
+    response = add_fee_attributes(response, &fee_result, fee_config.as_ref());
     
     Ok(response)
 }
@@ -264,16 +257,12 @@ pub fn execute_send_from(
     #[cfg(not(test))]
     let owner_addr = deps.api.addr_validate(&owner)?;
 
-    // 설정 로드
-    let config = CONFIG.load(deps.storage)?;
-    
-    // 수수료 계산
-    let (transfer_amount, fee_amount, fee_collector_str) = calculate_transfer_amounts(
-        deps.storage, amount, &config)?;
-
-    // deduct allowance before doing anything else have enough allowance
+    // 허용량 차감 먼저 수행
     deduct_allowance(deps.storage, &owner_addr, &info.sender, &env.block, amount)?;
 
+    // 수수료 계산 (새로운 방식)
+    let fee_result = calculate_fee(deps.as_ref(), amount, &owner_addr)?;
+    
     // 발신자 잔액 감소
     BALANCES.update(
         deps.storage,
@@ -288,45 +277,42 @@ pub fn execute_send_from(
         deps.storage,
         &rcpt_addr,
         |balance: Option<Uint128>| -> StdResult<_> { 
-            Ok(balance.unwrap_or_default() + transfer_amount) 
+            Ok(balance.unwrap_or_default() + fee_result.transfer_amount) 
         },
     )?;
-    
-    // 수수료 수취 계정에 수수료 추가
-    if !fee_amount.is_zero() && fee_collector_str.is_some() {
-        #[cfg(test)]
-        let fee_collector_addr = Addr::unchecked(&fee_collector_str.clone().unwrap());
-        #[cfg(not(test))]
-        let fee_collector_addr = deps.api.addr_validate(&fee_collector_str.clone().unwrap())?;
-        
-        BALANCES.update(deps.storage, &fee_collector_addr, |balance| -> StdResult<_> {
-            Ok(balance.unwrap_or_default() + fee_amount)
-        })?;
-    }
 
-    let mut attrs = vec![
-        attr("action", "send_from"),
-        attr("from", &owner),
-        attr("to", &contract),
-        attr("by", &info.sender),
-        attr("amount", transfer_amount),
-    ];
+     // 테스트 환경에서만 수수료 이체 직접 처리
+    #[cfg(test)]
+    apply_fee_transfers(deps.storage, &fee_result)?;
     
-    if !fee_amount.is_zero() {
-        attrs.push(attr("fee_amount", fee_amount));
-        attrs.push(attr("fee_collector", fee_collector_str.clone().unwrap_or_else(|| "None".to_string())));
-    }
+    // 응답 생성
+    let mut response = Response::new()
+        .add_attribute("action", "send_from")
+        .add_attribute("from", owner)
+        .add_attribute("to", contract.clone())
+        .add_attribute("by", info.sender.to_string())
+        .add_attribute("amount", fee_result.transfer_amount);
 
-    // create a send message (수수료 차감 후 금액으로)
+    // 수수료 메시지가 있으면 추가 (클론을 사용하여 소유권 이동 방지)
+    if !fee_result.fee_msgs.is_empty() {
+        response = response.add_messages(fee_result.fee_msgs.clone());
+    }
+    
+    // 수수료 관련 속성 추가
+    let fee_config = FEE_CONFIG.may_load(deps.storage)?;
+    response = add_fee_attributes(response, &fee_result, fee_config.as_ref());
+
+    // Cw20ReceiveMsg 메시지 생성 및 추가
     let msg = Cw20ReceiveMsg {
         sender: info.sender.into(),
-        amount: transfer_amount,  // 수수료 차감 후 금액
+        amount: fee_result.transfer_amount,  // 수수료 차감 후 금액
         msg,
     }
     .into_cosmos_msg(contract)?;
-
-    let res = Response::new().add_message(msg).add_attributes(attrs);
-    Ok(res)
+    
+    response = response.add_message(msg);
+    
+    Ok(response)
 }
 
 pub fn query_allowance(deps: Deps, owner: String, spender: String) -> StdResult<AllowanceResponse> {

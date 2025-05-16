@@ -1,8 +1,10 @@
+use std::str::FromStr;
+
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::Order::Ascending;
 use cosmwasm_std::{
-    to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult, Storage, Uint128 
+    to_json_binary, Binary, Decimal, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult, Uint128 
 };
 use cw2::{ensure_from_older_version, set_contract_version};
 use cw20::{
@@ -19,11 +21,16 @@ use crate::allowances::{
 };
 use crate::enumerable::{query_all_accounts, query_owner_allowances, query_spender_allowances};
 use crate::error::ContractError;
+use crate::fee::{add_fee_attributes, calculate_fee, validate_fee_config, FeeTokenType, FeeType};
+
+#[cfg(test)]
+use crate::fee::apply_fee_transfers;
+
 use crate::msg::{
-     ConfigInfo, ExecuteMsg, FeeGranterResponse, InstantiateMsg, MigrateMsg, QueryMsg, TotalSupplyResponse, TransferFeeResponse
+     ConfigInfo, ExecuteMsg, FeeCollectorInput, FeeCollectorResponse, FeeConfigResponse, FeeGranterResponse, InstantiateMsg, MigrateMsg, QueryMsg, TotalSupplyResponse
 };
 use crate::state::{
-    ExtendedTokenInfo, MinterData, TokenInfo, ALLOWANCES, ALLOWANCES_SPENDER, BALANCES, CONFIG, EXTENDED_INFO, LOGO, MARKETING_INFO, TOKEN_INFO
+    ExtendedTokenInfo, FeeCollectorInfo, FeeConfig, MinterData, TokenInfo, ALLOWANCES, ALLOWANCES_SPENDER, BALANCES, CONFIG, EXTENDED_INFO, FEE_CONFIG, LOGO, MARKETING_INFO, TOKEN_INFO
 };
 
 // Contract name and version
@@ -79,42 +86,6 @@ fn verify_png_logo(logo: &[u8]) -> Result<(), ContractError> {
     } else {
         Ok(())
     }
-}
-
-// 수수료 계산 헬퍼 함수
-pub fn calculate_transfer_amounts(
-    _storage: &dyn Storage,
-    amount: Uint128,
-    config: &ConfigInfo,
-) -> Result<(Uint128, Uint128, Option<String>), ContractError> {
-    // 수수료 계산
-    let fee_amount = if let Some(fee_basis_points) = config.transfer_fee {
-        // fee_basis_points는 100 = 1%로 표현됨 (예: 150 = 1.5%)
-        println!("Amount: {}, fee_basis_points: {}", amount, fee_basis_points);
-        
-        // 직접 계산으로 변경
-        let fee = amount.u128() * fee_basis_points.u128() / 10000u128;
-        println!("Calculated fee: {}", fee);
-        Uint128::new(fee)
-        
-        // 기존 코드
-        // amount.multiply_ratio(fee_basis_points, Uint128::new(10000))
-    } else {
-        Uint128::zero()
-    };
-    
-    println!("Fee amount: {}", fee_amount);
-    
-    // 실제 전송 금액
-    let transfer_amount = amount.checked_sub(fee_amount)
-        .map_err(|_| ContractError::InvalidAmount {})?;
-    
-    println!("Transfer amount: {}", transfer_amount);
-    
-    // fee_collector를 문자열로 변환하여 반환
-    let fee_collector_str = config.fee_collector.as_ref().map(|addr| addr.to_string());
-    
-    Ok((transfer_amount, fee_amount, fee_collector_str))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -327,9 +298,12 @@ pub fn execute(
         ExecuteMsg::UpdateConfig { new_config } => {
             execute_update_config(deps, info, new_config)
         },
-        ExecuteMsg::SetTransferFee { fee_percentage, fee_collector } => {
-            execute_set_transfer_fee(deps, info, fee_percentage, fee_collector)
-        },
+        ExecuteMsg::SetFeeConfig {
+            fee_type,
+            token_type,
+            collectors,
+            is_active,
+        } => execute_set_fee_config(deps, info, fee_type, token_type, collectors, is_active),
     }
 }
 
@@ -346,54 +320,44 @@ pub fn execute_transfer(
     #[cfg(not(test))]
     let rcpt_addr = deps.api.addr_validate(&recipient)?;
     
-    // 설정 로드
-    let config = CONFIG.load(deps.storage)?;
-    
-    // 수수료 계산
-    let (transfer_amount, fee_amount, fee_collector_str) = calculate_transfer_amounts(
-        deps.storage, amount, &config)?;
-    
-    // 잔액 체크
+    // 잔액 확인
     let sender_balance = BALANCES.load(deps.storage, &info.sender)?;
     if sender_balance < amount {
         return Err(ContractError::InsufficientFunds {});
     }
+    
+    // 수수료 계산
+    let fee_result = calculate_fee(deps.as_ref(), amount, &info.sender)?;
     
     // 발신자 잔액 감소
     BALANCES.update(deps.storage, &info.sender, |balance| -> StdResult<_> {
         Ok(balance.unwrap_or_default().checked_sub(amount)?)
     })?;
     
-    // 수신자 잔액 증가
+    // 수신자 잔액 증가 (수수료 차감 후)
     BALANCES.update(deps.storage, &rcpt_addr, |balance| -> StdResult<_> {
-        Ok(balance.unwrap_or_default() + transfer_amount)
+        Ok(balance.unwrap_or_default() + fee_result.transfer_amount)
     })?;
+
+     // 테스트 환경에서만 수수료 이체 직접 처리
+    #[cfg(test)]
+    apply_fee_transfers(deps.storage, &fee_result)?;
     
-    // 수수료 수취 계정에 수수료 추가
-    if !fee_amount.is_zero() && fee_collector_str.is_some() {
-        #[cfg(test)]
-        let fee_collector_addr = Addr::unchecked(&fee_collector_str.clone().unwrap());
-        
-        #[cfg(not(test))]
-        let fee_collector_addr = deps.api.addr_validate(&fee_collector_str.clone().unwrap())?;
-        
-        BALANCES.update(deps.storage, &fee_collector_addr, |balance| -> StdResult<_> {
-            let new_balance = balance.unwrap_or_default() + fee_amount;
-            Ok(new_balance)
-        })?;
-    }
-    
+    // 응답 생성
     let mut response = Response::new()
         .add_attribute("action", "transfer")
         .add_attribute("from", info.sender.to_string())
         .add_attribute("to", recipient)
-        .add_attribute("amount", transfer_amount);
+        .add_attribute("amount", fee_result.transfer_amount);
     
-    if !fee_amount.is_zero() {
-        response = response
-            .add_attribute("fee_amount", fee_amount)
-            .add_attribute("fee_collector", fee_collector_str.unwrap_or_else(|| "None".to_string()));
+    // 수수료 메시지가 있으면 추가 (클론을 사용하여 소유권 이동 방지)
+    if !fee_result.fee_msgs.is_empty() {
+        response = response.add_messages(fee_result.fee_msgs.clone());
     }
+    
+    // 수수료 관련 속성 추가
+    let fee_config = FEE_CONFIG.may_load(deps.storage)?;
+    response = add_fee_attributes(response, &fee_result, fee_config.as_ref());
     
     Ok(response)
 }
@@ -435,56 +399,52 @@ pub fn execute_send(
 ) -> Result<Response, ContractError> {
     let rcpt_addr = deps.api.addr_validate(&contract)?;
     
-    // 설정 로드
-    let config = CONFIG.load(deps.storage)?;
-    
-    // 수수료 계산
-    let (transfer_amount, fee_amount, fee_collector_str) = calculate_transfer_amounts(
-        deps.storage, amount, &config)?;
-    
-    // 잔액 체크
+    // 잔액 확인
     let sender_balance = BALANCES.load(deps.storage, &info.sender)?;
     if sender_balance < amount {
         return Err(ContractError::InsufficientFunds {});
     }
+    
+    // 수수료 계산 (새로운 방식 사용)
+    let fee_result = calculate_fee(deps.as_ref(), amount, &info.sender)?;
     
     // 발신자 잔액 감소
     BALANCES.update(deps.storage, &info.sender, |balance| -> StdResult<_> {
         Ok(balance.unwrap_or_default().checked_sub(amount)?)
     })?;
     
-    // 수신자 잔액 증가
+    // 수신자 잔액 증가 (수수료 차감 후)
     BALANCES.update(deps.storage, &rcpt_addr, |balance| -> StdResult<_> {
-        Ok(balance.unwrap_or_default() + transfer_amount)
+        Ok(balance.unwrap_or_default() + fee_result.transfer_amount)
     })?;
+
+    // 테스트 환경에서만 수수료 이체 직접 처리
+    #[cfg(test)]
+    apply_fee_transfers(deps.storage, &fee_result)?;
     
-    // 수수료 수취 계정에 수수료 추가
-    if !fee_amount.is_zero() && fee_collector_str.is_some() {
-        let fee_collector_addr = deps.api.addr_validate(&fee_collector_str.clone().unwrap())?;
-        BALANCES.update(deps.storage, &fee_collector_addr, |balance| -> StdResult<_> {
-            Ok(balance.unwrap_or_default() + fee_amount)
-        })?;
-    }
-    
+    // 응답 생성
     let mut response = Response::new()
         .add_attribute("action", "send")
         .add_attribute("from", info.sender.to_string())
         .add_attribute("to", contract.clone())
-        .add_attribute("amount", transfer_amount)
+        .add_attribute("amount", fee_result.transfer_amount)
         .add_message(
             Cw20ReceiveMsg {
                 sender: info.sender.to_string(),
-                amount: transfer_amount,  // 수수료 차감 후 금액 전달
+                amount: fee_result.transfer_amount,  // 수수료 차감 후 금액 전달
                 msg,
             }
             .into_cosmos_msg(contract)?,
         );
     
-    if !fee_amount.is_zero() {
-        response = response
-            .add_attribute("fee_amount", fee_amount)
-            .add_attribute("fee_collector", fee_collector_str.unwrap_or_else(|| "None".to_string()));
+    // 수수료 메시지가 있으면 추가 (클론을 사용하여 소유권 이동 방지)
+    if !fee_result.fee_msgs.is_empty() {
+        response = response.add_messages(fee_result.fee_msgs.clone());
     }
+    
+    // 수수료 관련 속성 추가
+    let fee_config = FEE_CONFIG.may_load(deps.storage)?;
+    response = add_fee_attributes(response, &fee_result, fee_config.as_ref());
     
     Ok(response)
 }
@@ -692,11 +652,12 @@ pub fn execute_set_upgrade_admin(
 pub fn execute_update_config(
     deps: DepsMut,
     info: MessageInfo,
-    new_config: Option<ConfigInfo>,
+    new_config: Box<Option<ConfigInfo>>,
 ) -> Result<Response, ContractError> {
     let current_config = CONFIG.load(deps.storage)?;
     let extended_info = EXTENDED_INFO.load(deps.storage)?;
     let mut token_info = TOKEN_INFO.load(deps.storage)?;
+    let new_config = *new_config;
     
     // 권한 체크 - extended_info의 admin 또는 upgrade_admin만 가능
     if let Some(upgrade_admin) = current_config.upgrade_admin.as_ref() {
@@ -820,17 +781,18 @@ pub fn execute_set_fee_granter(
 }
 
 // 수수료 설정 함수
-pub fn execute_set_transfer_fee(
+pub fn execute_set_fee_config(
     deps: DepsMut,
     info: MessageInfo,
-    fee_percentage: Option<String>,
-    fee_collector: Option<String>,
+    fee_type: FeeType,
+    token_type: FeeTokenType,
+    collectors: Vec<FeeCollectorInput>,
+    is_active: bool,
 ) -> Result<Response, ContractError> {
-    let mut config = CONFIG.load(deps.storage)?;
+    // 관리자 권한 확인
     let extended_info = EXTENDED_INFO.load(deps.storage)?;
-    
-    // admin 권한 확인
     if info.sender != extended_info.admin {
+        let config = CONFIG.load(deps.storage)?;
         if let Some(upgrade_admin) = &config.upgrade_admin {
             if info.sender != *upgrade_admin {
                 return Err(ContractError::Unauthorized {});
@@ -840,65 +802,58 @@ pub fn execute_set_transfer_fee(
         }
     }
     
-    // 수수료율 문자열을 숫자로 변환하고 검증
-    let fee_uint = if let Some(ref fee_str) = fee_percentage {
-        // 문자열을 f64로 변환
-        let fee_f64 = fee_str.parse::<f64>()
-            .map_err(|_| ContractError::InvalidFeePercentage("Not a valid number".to_string()))?;
-        
-        // 최소 0.001%, 최대 100% 제한
-        if fee_f64 < 0.001 {
-            return Err(ContractError::InvalidFeePercentage(
-                "Fee percentage must be at least 0.001%".to_string()
-            ));
-        }
-        if fee_f64 > 100.0 {
-            return Err(ContractError::InvalidFeePercentage(
-                "Fee percentage cannot exceed 100%".to_string()
-            ));
-        }
-        
-        // 백분율을 내부 표현(10000 기준)으로 변환
-        // 예: 1.5% -> 150
-        let fee_basis_points = (fee_f64 * 100.0).round() as u128;
-        println!("Fee basis points: {}", fee_basis_points); // 디버깅용 로그 추가
-        Some(Uint128::new(fee_basis_points))
-    } else {
-        None
-    };
+    // 수취인 정보 변환 및 검증
+    let mut fee_collectors = vec![];
     
-    // fee_collector 검증
-    let fee_collector_addr = if let Some(ref collector) = fee_collector {
+    for collector in collectors {
+        // 테스트 환경과 프로덕션 환경에서 다르게 처리
         #[cfg(test)]
-        let addr = Addr::unchecked(collector);
+        let address = Addr::unchecked(&collector.address);
         
         #[cfg(not(test))]
-        let addr = deps.api.addr_validate(collector)?;
+        let address = deps.api.addr_validate(&collector.address)?;
         
-        Some(addr)
-    } else {
-        None
-    };
-    
-    // 수수료가 있는데 수취인이 없으면 오류
-    if fee_uint.is_some() && fee_uint != Some(Uint128::zero()) && fee_collector_addr.is_none() {
-        return Err(ContractError::InvalidConfig {
-            msg: "Fee collector must be set when transfer fee is enabled".to_string()
+        let percentage = Decimal::from_str(&collector.percentage)
+            .map_err(|_| ContractError::InvalidFeePercentage("Invalid decimal format".to_string()))?;
+            
+        if percentage <= Decimal::zero() || percentage > Decimal::one() {
+            return Err(ContractError::InvalidFeePercentage(
+                "Percentage must be between 0 and 100".to_string()
+            ));
+        }
+        
+        fee_collectors.push(FeeCollectorInfo {
+            address,
+            percentage,
         });
     }
     
-    // 설정 업데이트
-    config.transfer_fee = fee_uint;
-    config.fee_collector = fee_collector_addr;
-    CONFIG.save(deps.storage, &config)?;
+    // 토큰 주소 검증 (CW20인 경우)
+    if let FeeTokenType::Cw20 { contract_addr } = &token_type {
+        #[cfg(test)]
+        let _validated_addr = Addr::unchecked(contract_addr);
+        
+        #[cfg(not(test))]
+        deps.api.addr_validate(contract_addr)?;
+    }
     
-    let fee_str = fee_percentage.unwrap_or_else(|| "None".to_string());
-    let collector_str = fee_collector.unwrap_or_else(|| "None".to_string());
+    // 수수료 설정 생성
+    let fee_config = FeeConfig {
+        fee_type,
+        token_type,
+        collectors: fee_collectors,
+        is_active,
+    };
+    
+    // 수수료 설정 유효성 검사
+    validate_fee_config(&fee_config)?;
+    
+    // 저장
+    FEE_CONFIG.save(deps.storage, &fee_config)?;
     
     Ok(Response::new()
-        .add_attribute("action", "set_transfer_fee")
-        .add_attribute("fee_percentage", fee_str)
-        .add_attribute("fee_collector", collector_str))
+        .add_attribute("action", "set_fee_config")
+        .add_attribute("fee_active", is_active.to_string()))
 }
 
 
@@ -933,21 +888,37 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::DownloadLogo {} => to_json_binary(&query_download_logo(deps)?),
         QueryMsg::TotalSupply {} => to_json_binary(&query_total_supply(deps)?),
         QueryMsg::FeeGranter {} => to_json_binary(&query_fee_granter(deps)?),
-        QueryMsg::TransferFee {} => to_json_binary(&query_transfer_fee(deps)?),
+        QueryMsg::FeeConfig {} => to_json_binary(&query_fee_config(deps)?),
     }
 }
 
-// 수수료 쿼리 핸들러
-pub fn query_transfer_fee(deps: Deps) -> StdResult<TransferFeeResponse> {
-    let config = CONFIG.load(deps.storage)?;
-    Ok(TransferFeeResponse {
-        transfer_fee: config.transfer_fee.map(|fee| {
-            // 내부 저장값(10000 기준)을 백분율 문자열로 변환
-            let percentage = fee.u128() as f64 / 100.0;
-            format!("{:.3}", percentage)
+pub fn query_fee_config(deps: Deps) -> StdResult<FeeConfigResponse> {
+    let fee_config = FEE_CONFIG.may_load(deps.storage)?;
+    
+    match fee_config {
+        Some(config) => {
+            let collectors = config.collectors
+                .iter()
+                .map(|c| FeeCollectorResponse {
+                    address: c.address.to_string(),
+                    percentage: c.percentage.to_string(),
+                })
+                .collect();
+                
+            Ok(FeeConfigResponse {
+                fee_type: config.fee_type,
+                token_type: config.token_type,
+                collectors,
+                is_active: config.is_active,
+            })
+        },
+        None => Ok(FeeConfigResponse {
+            fee_type: FeeType::Percentage(Decimal::zero()),
+            token_type: FeeTokenType::Native { denom: "".to_string() },
+            collectors: vec![],
+            is_active: false,
         }),
-        fee_collector: config.fee_collector.map(|addr| addr.to_string()),
-    })
+    }
 }
 
 pub fn query_balance(deps: Deps, address: String) -> StdResult<BalanceResponse> {

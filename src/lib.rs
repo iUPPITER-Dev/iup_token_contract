@@ -4,6 +4,7 @@ pub mod enumerable;
 pub mod error;
 pub mod msg;
 pub mod state;
+pub mod fee;
 
 pub use crate::error::ContractError;
 

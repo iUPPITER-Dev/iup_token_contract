@@ -59,5 +59,9 @@ pub enum ContractError {
     #[error("Insufficient funds")]
     InsufficientFunds {},
 
+    #[error("Invalid JSON data")]
+    InvalidJson {},
     
+    #[error("Fee collectors percentages must sum to 100")]
+    InvalidFeeDistribution {},
 }

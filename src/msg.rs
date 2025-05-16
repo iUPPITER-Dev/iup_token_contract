@@ -4,6 +4,8 @@ use cw20::{Cw20Coin, Expiration, Logo };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::fee::{FeeTokenType, FeeType};
+
 #[cw_serde]
 pub struct InstantiateMarketingInfo {
     pub project: Option<String>,
@@ -47,6 +49,27 @@ pub struct InstantiateMsg {
 pub struct TransferFeeResponse {
     pub transfer_fee: Option<String>,
     pub fee_collector: Option<String>,
+}
+
+// 수수료 설정 응답을 위한 구조체
+#[cw_serde]
+pub struct FeeConfigResponse {
+    pub fee_type: FeeType,
+    pub token_type: FeeTokenType,
+    pub collectors: Vec<FeeCollectorResponse>,
+    pub is_active: bool,
+}
+
+#[cw_serde]
+pub struct FeeCollectorInput {
+    pub address: String,
+    pub percentage: String,  // "12.5" 같은 형식의 문자열
+}
+
+#[cw_serde]
+pub struct FeeCollectorResponse {
+    pub address: String,
+    pub percentage: String,
 }
 
 impl InstantiateMsg {
@@ -142,13 +165,14 @@ pub enum ExecuteMsg {
         address: String,
     },
     UpdateConfig {
-        new_config: Option<ConfigInfo>,
+        new_config: Box<Option<ConfigInfo>>,
     },
-    SetTransferFee {
-        fee_percentage: Option<String>,
-        fee_collector: Option<String>,
+    SetFeeConfig {
+        fee_type: FeeType,
+        token_type: FeeTokenType,
+        collectors: Vec<FeeCollectorInput>,
+        is_active: bool,
     },
-   
 }
 
 #[cw_serde]
@@ -188,8 +212,8 @@ pub enum QueryMsg {
     Minter {},
     #[returns(TotalSupplyResponse)]
     TotalSupply {},
-    #[returns(TransferFeeResponse)]
-    TransferFee {},
+    #[returns(FeeConfigResponse)]
+    FeeConfig {},
 }
 
 #[cw_serde]

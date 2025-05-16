@@ -1,0 +1,23 @@
+{   
+   "name": "iUP",
+   "symbol": "iUP",
+   "decimals": 6,
+   "initial_balances": [
+     {       
+       "address": "xpla1... marketing wallet",
+       "amount": "100000000"
+     },     
+     {       
+       "address": "xpla1... invest wallet",
+       "amount": "100000000"
+     },       
+     {       
+       "address": "xpla1... EcoSystem wallet",
+       "amount": "8000000"
+     }   
+   ],   
+   "mint": {     
+     "cap": "1000000000",
+     "minter": "xpla1..."
+   } 
+}
